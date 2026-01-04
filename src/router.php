@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . "/db.php";
 
+/* ---------- Helpers ---------- */
+
 function json_response($data, int $code = 200) {
   http_response_code($code);
   header("Content-Type: application/json; charset=utf-8");
@@ -35,16 +37,52 @@ cors();
 $path = path();
 $m = method();
 
-if ($m === "GET" && $path === "/api/health") {
-  json_response(["ok" => true, "message" => "API working"]);
+/* ---------- DEBUG (temporary) ---------- */
+/* Visit /api/debug-env to confirm Railway env vars */
+if ($m === "GET" && $path === "/api/debug-env") {
+  json_response([
+    "DB_HOST" => getenv("DB_HOST") ?: null,
+    "DB_PORT" => getenv("DB_PORT") ?: null,
+    "DB_NAME" => getenv("DB_NAME") ?: null,
+    "DB_USER" => getenv("DB_USER") ?: null,
+    "DB_PASS_set" => getenv("DB_PASS") ? true : false,
+  ]);
 }
 
+/* ---------- Health ---------- */
+if ($m === "GET" && $path === "/api/health") {
+  json_response([
+    "ok" => true,
+    "message" => "API working"
+  ]);
+}
+
+/* ---------- Exercises ---------- */
 if ($m === "GET" && $path === "/api/exercises") {
   $pdo = db();
-  $rows = $pdo->query("SELECT id, name, calories_per_minute FROM exercises ORDER BY name")->fetchAll();
+  $rows = $pdo->query(
+    "SELECT id, name, calories_per_minute FROM exercises ORDER BY name"
+  )->fetchAll();
   json_response($rows);
 }
 
+/* ---------- Create Plan ---------- */
+/*
+POST /api/plans
+Body:
+{
+  "user_id": 1,
+  "name": "My Plan",
+  "items": [
+    {
+      "name": "Push-ups",
+      "quantity": 2,
+      "time": 3,
+      "caloriesPerMinute": 5
+    }
+  ]
+}
+*/
 if ($m === "POST" && $path === "/api/plans") {
   $pdo = db();
   $body = read_json();
@@ -72,18 +110,40 @@ if ($m === "POST" && $path === "/api/plans") {
 
   $items_json = json_encode($items);
 
-  $stmt = $pdo->prepare("INSERT INTO plans(user_id, name, items_json, total_time, total_calories) VALUES(?,?,?,?,?)");
-  $stmt->execute([$user_id, $name, $items_json, $total_time, $total_calories]);
+  $stmt = $pdo->prepare(
+    "INSERT INTO plans (user_id, name, items_json, total_time, total_calories)
+     VALUES (?, ?, ?, ?, ?)"
+  );
+  $stmt->execute([
+    $user_id,
+    $name,
+    $items_json,
+    $total_time,
+    $total_calories
+  ]);
 
-  json_response(["id" => (int)$pdo->lastInsertId(), "total_time" => $total_time, "total_calories" => $total_calories], 201);
+  json_response([
+    "id" => (int)$pdo->lastInsertId(),
+    "total_time" => $total_time,
+    "total_calories" => $total_calories
+  ], 201);
 }
 
+/* ---------- Get Plans ---------- */
 if ($m === "GET" && $path === "/api/plans") {
   $pdo = db();
   $user_id = (int)($_GET["user_id"] ?? 0);
-  if ($user_id <= 0) json_response(["error" => "user_id is required"], 400);
 
-  $stmt = $pdo->prepare("SELECT id, user_id, name, items_json, total_time, total_calories, created_at FROM plans WHERE user_id=? ORDER BY id DESC");
+  if ($user_id <= 0) {
+    json_response(["error" => "user_id is required"], 400);
+  }
+
+  $stmt = $pdo->prepare(
+    "SELECT id, name, items_json, total_time, total_calories, created_at
+     FROM plans
+     WHERE user_id = ?
+     ORDER BY id DESC"
+  );
   $stmt->execute([$user_id]);
   $rows = $stmt->fetchAll();
 
@@ -95,12 +155,16 @@ if ($m === "GET" && $path === "/api/plans") {
   json_response($rows);
 }
 
+/* ---------- Delete Plan ---------- */
 if ($m === "DELETE" && preg_match("#^/api/plans/(\d+)$#", $path, $matches)) {
   $pdo = db();
   $id = (int)$matches[1];
-  $stmt = $pdo->prepare("DELETE FROM plans WHERE id=?");
+
+  $stmt = $pdo->prepare("DELETE FROM plans WHERE id = ?");
   $stmt->execute([$id]);
+
   json_response(["deleted" => true]);
 }
 
+/* ---------- Not Found ---------- */
 json_response(["error" => "Not found"], 404);
