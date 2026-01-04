@@ -1,7 +1,7 @@
 <?php
 require_once __DIR__ . "/db.php";
 
-/* ---------- Helpers ---------- */
+/* ================= HELPERS ================= */
 
 function json_response($data, int $code = 200) {
   http_response_code($code);
@@ -16,40 +16,29 @@ function read_json() {
   return is_array($data) ? $data : [];
 }
 
+function method() {
+  return strtoupper($_SERVER["REQUEST_METHOD"]);
+}
+
 function path() {
   $uri = parse_url($_SERVER["REQUEST_URI"], PHP_URL_PATH);
   return rtrim($uri, "/");
 }
 
-function method() {
-  return strtoupper($_SERVER["REQUEST_METHOD"]);
-}
-
 function cors() {
   header("Access-Control-Allow-Origin: *");
   header("Access-Control-Allow-Headers: Content-Type, Authorization");
-  header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+  header("Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS");
   if (method() === "OPTIONS") exit;
 }
 
 cors();
 
-$path = path();
 $m = method();
+$path = path();
 
-/* ---------- DEBUG (temporary) ---------- */
-/* Visit /api/debug-env to confirm Railway env vars */
-if ($m === "GET" && $path === "/api/debug-env") {
-  json_response([
-    "DB_HOST" => getenv("DB_HOST") ?: null,
-    "DB_PORT" => getenv("DB_PORT") ?: null,
-    "DB_NAME" => getenv("DB_NAME") ?: null,
-    "DB_USER" => getenv("DB_USER") ?: null,
-    "DB_PASS_set" => getenv("DB_PASS") ? true : false,
-  ]);
-}
+/* ================= HEALTH ================= */
 
-/* ---------- Health ---------- */
 if ($m === "GET" && $path === "/api/health") {
   json_response([
     "ok" => true,
@@ -57,32 +46,71 @@ if ($m === "GET" && $path === "/api/health") {
   ]);
 }
 
-/* ---------- Exercises ---------- */
+/* ================= SETUP DB (RUN ONCE) ================= */
+/* DELETE THIS BLOCK AFTER SUCCESS */
+
+if ($m === "GET" && $path === "/api/setup-db") {
+  $pdo = db();
+
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      email VARCHAR(120) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  ");
+
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS exercises (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(100) NOT NULL UNIQUE,
+      calories_per_minute DOUBLE NOT NULL
+    )
+  ");
+
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS plans (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      name VARCHAR(120) NOT NULL,
+      items_json JSON NOT NULL,
+      total_time DOUBLE NOT NULL DEFAULT 0,
+      total_calories DOUBLE NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX(user_id)
+    )
+  ");
+
+  $pdo->exec("
+    INSERT IGNORE INTO exercises (name, calories_per_minute) VALUES
+    ('Push-ups', 5.0),
+    ('Squats', 8.0),
+    ('Plank', 4.0),
+    ('HIT', 7.0),
+    ('Jumping rope', 10.0)
+  ");
+
+  json_response([
+    "ok" => true,
+    "message" => "Tables created and exercises inserted"
+  ]);
+}
+
+/* ================= EXERCISES ================= */
+
 if ($m === "GET" && $path === "/api/exercises") {
   $pdo = db();
-  $rows = $pdo->query(
-    "SELECT id, name, calories_per_minute FROM exercises ORDER BY name"
-  )->fetchAll();
+  $rows = $pdo
+    ->query("SELECT id, name, calories_per_minute FROM exercises ORDER BY name")
+    ->fetchAll(PDO::FETCH_ASSOC);
+
   json_response($rows);
 }
 
-/* ---------- Create Plan ---------- */
-/*
-POST /api/plans
-Body:
-{
-  "user_id": 1,
-  "name": "My Plan",
-  "items": [
-    {
-      "name": "Push-ups",
-      "quantity": 2,
-      "time": 3,
-      "caloriesPerMinute": 5
-    }
-  ]
-}
-*/
+/* ================= CREATE PLAN ================= */
+
 if ($m === "POST" && $path === "/api/plans") {
   $pdo = db();
   $body = read_json();
@@ -95,29 +123,29 @@ if ($m === "POST" && $path === "/api/plans") {
     json_response(["error" => "Invalid plan data"], 400);
   }
 
-  $total_time = 0.0;
-  $total_calories = 0.0;
+  $total_time = 0;
+  $total_calories = 0;
 
   foreach ($items as $it) {
     $q = (int)($it["quantity"] ?? 0);
     $t = (float)($it["time"] ?? 0);
     $cpm = (float)($it["caloriesPerMinute"] ?? 0);
+
     if ($q > 0 && $t > 0 && $cpm > 0) {
-      $total_time += ($t * $q);
-      $total_calories += ($cpm * $t * $q);
+      $total_time += $q * $t;
+      $total_calories += $q * $t * $cpm;
     }
   }
 
-  $items_json = json_encode($items);
+  $stmt = $pdo->prepare("
+    INSERT INTO plans (user_id, name, items_json, total_time, total_calories)
+    VALUES (?, ?, ?, ?, ?)
+  ");
 
-  $stmt = $pdo->prepare(
-    "INSERT INTO plans (user_id, name, items_json, total_time, total_calories)
-     VALUES (?, ?, ?, ?, ?)"
-  );
   $stmt->execute([
     $user_id,
     $name,
-    $items_json,
+    json_encode($items),
     $total_time,
     $total_calories
   ]);
@@ -129,7 +157,8 @@ if ($m === "POST" && $path === "/api/plans") {
   ], 201);
 }
 
-/* ---------- Get Plans ---------- */
+/* ================= GET PLANS ================= */
+
 if ($m === "GET" && $path === "/api/plans") {
   $pdo = db();
   $user_id = (int)($_GET["user_id"] ?? 0);
@@ -138,14 +167,15 @@ if ($m === "GET" && $path === "/api/plans") {
     json_response(["error" => "user_id is required"], 400);
   }
 
-  $stmt = $pdo->prepare(
-    "SELECT id, name, items_json, total_time, total_calories, created_at
-     FROM plans
-     WHERE user_id = ?
-     ORDER BY id DESC"
-  );
+  $stmt = $pdo->prepare("
+    SELECT id, name, items_json, total_time, total_calories, created_at
+    FROM plans
+    WHERE user_id = ?
+    ORDER BY id DESC
+  ");
+
   $stmt->execute([$user_id]);
-  $rows = $stmt->fetchAll();
+  $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
   foreach ($rows as &$r) {
     $r["items"] = json_decode($r["items_json"], true);
@@ -155,10 +185,11 @@ if ($m === "GET" && $path === "/api/plans") {
   json_response($rows);
 }
 
-/* ---------- Delete Plan ---------- */
-if ($m === "DELETE" && preg_match("#^/api/plans/(\d+)$#", $path, $matches)) {
+/* ================= DELETE PLAN ================= */
+
+if ($m === "DELETE" && preg_match("#^/api/plans/(\d+)$#", $path, $mch)) {
   $pdo = db();
-  $id = (int)$matches[1];
+  $id = (int)$mch[1];
 
   $stmt = $pdo->prepare("DELETE FROM plans WHERE id = ?");
   $stmt->execute([$id]);
@@ -166,5 +197,6 @@ if ($m === "DELETE" && preg_match("#^/api/plans/(\d+)$#", $path, $matches)) {
   json_response(["deleted" => true]);
 }
 
-/* ---------- Not Found ---------- */
+/* ================= NOT FOUND ================= */
+
 json_response(["error" => "Not found"], 404);
