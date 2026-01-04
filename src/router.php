@@ -108,6 +108,69 @@ if ($m === "GET" && $path === "/api/exercises") {
 
   json_response($rows);
 }
+/* ================= AUTH: REGISTER ================= */
+/*
+POST /api/register
+Body: { "name": "...", "email": "...", "password": "..." }
+*/
+if ($m === "POST" && $path === "/api/register") {
+  $pdo = db();
+  $body = read_json();
+
+  $name = trim($body["name"] ?? "");
+  $email = trim($body["email"] ?? "");
+  $password = (string)($body["password"] ?? "");
+
+  if ($name === "" || $email === "" || strlen($password) < 4) {
+    json_response(["error" => "Invalid data"], 400);
+  }
+
+  $hash = password_hash($password, PASSWORD_BCRYPT);
+
+  try {
+    $stmt = $pdo->prepare("INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)");
+    $stmt->execute([$name, $email, $hash]);
+
+    json_response([
+      "id" => (int)$pdo->lastInsertId(),
+      "name" => $name,
+      "email" => $email
+    ], 201);
+  } catch (Exception $e) {
+    json_response(["error" => "Email already used"], 409);
+  }
+}
+
+/* ================= AUTH: LOGIN ================= */
+/*
+POST /api/login
+Body: { "email": "...", "password": "..." }
+*/
+if ($m === "POST" && $path === "/api/login") {
+  $pdo = db();
+  $body = read_json();
+
+  $email = trim($body["email"] ?? "");
+  $password = (string)($body["password"] ?? "");
+
+  if ($email === "" || $password === "") {
+    json_response(["error" => "Invalid data"], 400);
+  }
+
+  $stmt = $pdo->prepare("SELECT id, name, email, password_hash FROM users WHERE email = ? LIMIT 1");
+  $stmt->execute([$email]);
+  $user = $stmt->fetch(PDO::FETCH_ASSOC);
+
+  if (!$user || !password_verify($password, $user["password_hash"])) {
+    json_response(["error" => "Wrong email or password"], 401);
+  }
+
+  json_response([
+    "id" => (int)$user["id"],
+    "name" => $user["name"],
+    "email" => $user["email"]
+  ]);
+}
 
 /* ================= CREATE PLAN ================= */
 
